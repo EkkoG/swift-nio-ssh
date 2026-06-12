@@ -33,7 +33,7 @@ enum SFTPRequestDecoder {
             guard let handle = payload.readSFTPStringBuffer() else {
                 throw SFTPError.protocolViolation("Invalid CLOSE request")
             }
-            return (requestID, .close(handle: Array(handle.readableBytesView)))
+            return (requestID, .close(handle: handle))
         case SFTPPacketType.read:
             guard let handle = payload.readSFTPStringBuffer(),
                 let offset = payload.readInteger(as: UInt64.self),
@@ -41,7 +41,7 @@ enum SFTPRequestDecoder {
             else {
                 throw SFTPError.protocolViolation("Invalid READ request")
             }
-            return (requestID, .read(handle: Array(handle.readableBytesView), offset: offset, length: length))
+            return (requestID, .read(handle: handle, offset: offset, length: length))
         case SFTPPacketType.write:
             guard let handle = payload.readSFTPStringBuffer(),
                 let offset = payload.readInteger(as: UInt64.self),
@@ -49,7 +49,7 @@ enum SFTPRequestDecoder {
             else {
                 throw SFTPError.protocolViolation("Invalid WRITE request")
             }
-            return (requestID, .write(handle: Array(handle.readableBytesView), offset: offset, data: Array(data.readableBytesView)))
+            return (requestID, .write(handle: handle, offset: offset, data: data))
         case SFTPPacketType.lstat:
             guard let path = payload.readSFTPString() else {
                 throw SFTPError.protocolViolation("Invalid LSTAT request")
@@ -59,7 +59,7 @@ enum SFTPRequestDecoder {
             guard let handle = payload.readSFTPStringBuffer() else {
                 throw SFTPError.protocolViolation("Invalid FSTAT request")
             }
-            return (requestID, .fstat(handle: Array(handle.readableBytesView)))
+            return (requestID, .fstat(handle: handle))
         case SFTPPacketType.setstat:
             guard let path = payload.readSFTPString() else {
                 throw SFTPError.protocolViolation("Invalid SETSTAT request")
@@ -69,7 +69,7 @@ enum SFTPRequestDecoder {
             guard let handle = payload.readSFTPStringBuffer() else {
                 throw SFTPError.protocolViolation("Invalid FSETSTAT request")
             }
-            return (requestID, .fsetstat(handle: Array(handle.readableBytesView), attributes: try payload.readSFTPAttributes()))
+            return (requestID, .fsetstat(handle: handle, attributes: try payload.readSFTPAttributes()))
         case SFTPPacketType.opendir:
             guard let path = payload.readSFTPString() else {
                 throw SFTPError.protocolViolation("Invalid OPENDIR request")
@@ -79,7 +79,7 @@ enum SFTPRequestDecoder {
             guard let handle = payload.readSFTPStringBuffer() else {
                 throw SFTPError.protocolViolation("Invalid READDIR request")
             }
-            return (requestID, .readdir(handle: Array(handle.readableBytesView)))
+            return (requestID, .readdir(handle: handle))
         case SFTPPacketType.remove:
             guard let path = payload.readSFTPString() else {
                 throw SFTPError.protocolViolation("Invalid REMOVE request")
@@ -128,7 +128,7 @@ enum SFTPRequestDecoder {
             guard let name = payload.readSFTPString() else {
                 throw SFTPError.protocolViolation("Invalid EXTENDED request")
             }
-            return (requestID, .extended(name: name, data: Array(payload.readableBytesView)))
+            return (requestID, .extended(name: name, data: payload))
         default:
             throw SFTPError.protocolViolation("Unsupported SFTP request type \(type)")
         }
@@ -142,7 +142,7 @@ enum SFTPResponseEncoder {
             body.writeInteger(version.rawValue)
             for extensionData in extensions {
                 body.writeSFTPString(extensionData.name)
-                body.writeSFTPString(extensionData.data)
+                body.writeSFTPImmutableStringBuffer(extensionData.data)
             }
         }
         return buffer
@@ -158,9 +158,9 @@ enum SFTPResponseEncoder {
                 body.writeSFTPString(status.message)
                 body.writeSFTPString(status.languageTag)
             case .handle(let handle):
-                body.writeSFTPString(handle)
+                body.writeSFTPImmutableStringBuffer(handle)
             case .data(let data):
-                body.writeSFTPString(data)
+                body.writeSFTPImmutableStringBuffer(data)
             case .name(let entries):
                 body.writeInteger(UInt32(entries.count))
                 for entry in entries {
@@ -171,7 +171,8 @@ enum SFTPResponseEncoder {
             case .attributes(let attributes):
                 body.writeSFTPAttributes(attributes)
             case .extendedReply(let data):
-                body.writeBytes(data)
+                var data = data
+                body.writeBuffer(&data)
             }
         }
         return buffer

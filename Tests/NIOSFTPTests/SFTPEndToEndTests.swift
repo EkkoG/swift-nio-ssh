@@ -167,12 +167,12 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
         maximumNameLength: 255
     )
     private let supportedExtensions: [SFTPExtension] = [
-        .init(name: SFTPExtensionName.posixRename.rawValue, data: Array("1".utf8)),
-        .init(name: SFTPExtensionName.statvfs.rawValue, data: Array("2".utf8)),
-        .init(name: SFTPExtensionName.fstatvfs.rawValue, data: Array("2".utf8)),
-        .init(name: SFTPExtensionName.hardlink.rawValue, data: Array("1".utf8)),
-        .init(name: SFTPExtensionName.fsync.rawValue, data: Array("1".utf8)),
-        .init(name: SFTPExtensionName.copyData.rawValue, data: Array("1".utf8)),
+        .init(name: SFTPExtensionName.posixRename.rawValue, data: ByteBuffer(string: "1")),
+        .init(name: SFTPExtensionName.statvfs.rawValue, data: ByteBuffer(string: "2")),
+        .init(name: SFTPExtensionName.fstatvfs.rawValue, data: ByteBuffer(string: "2")),
+        .init(name: SFTPExtensionName.hardlink.rawValue, data: ByteBuffer(string: "1")),
+        .init(name: SFTPExtensionName.fsync.rawValue, data: ByteBuffer(string: "1")),
+        .init(name: SFTPExtensionName.copyData.rawValue, data: ByteBuffer(string: "1")),
     ]
 
     init(allocator: ByteBufferAllocator) {
@@ -240,9 +240,9 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
             }
             let handle = self.makeHandle(prefix: "dir")
             self.directoryHandles[handle] = (path: path, emitted: false)
-            return .handle(Array(handle.utf8))
+            return .handle(ByteBuffer(string: handle))
         case .readdir(let handle):
-            let key = String(decoding: handle, as: UTF8.self)
+            let key = String(buffer: handle)
             guard var entry = self.directoryHandles[key] else {
                 return .status(.init(code: .failure, message: "invalid directory handle"))
             }
@@ -267,9 +267,9 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
             }
             let handle = self.makeHandle(prefix: "file")
             self.fileHandles[handle] = path
-            return .handle(Array(handle.utf8))
+            return .handle(ByteBuffer(string: handle))
         case .read(let handle, let offset, let length):
-            guard let path = self.fileHandles[String(decoding: handle, as: UTF8.self)],
+            guard let path = self.fileHandles[String(buffer: handle)],
                 let entry = self.files[path]
             else {
                 return .status(.init(code: .failure, message: "invalid file handle"))
@@ -279,9 +279,9 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
                 return .status(.init(code: .eof))
             }
             let end = min(entry.contents.count, start + Int(length))
-            return .data(Array(entry.contents[start..<end]))
+            return .data(ByteBuffer(bytes: entry.contents[start..<end]))
         case .write(let handle, let offset, let data):
-            guard let key = self.fileHandles[String(decoding: handle, as: UTF8.self)],
+            guard let key = self.fileHandles[String(buffer: handle)],
                 var entry = self.files[key]
             else {
                 return .status(.init(code: .failure, message: "invalid file handle"))
@@ -290,11 +290,12 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
             if entry.contents.count < start {
                 entry.contents.append(contentsOf: repeatElement(0, count: start - entry.contents.count))
             }
-            let end = start + data.count
+            let bytes = Array(data.readableBytesView)
+            let end = start + bytes.count
             if entry.contents.count < end {
                 entry.contents.append(contentsOf: repeatElement(0, count: end - entry.contents.count))
             }
-            entry.contents.replaceSubrange(start..<end, with: data)
+            entry.contents.replaceSubrange(start..<end, with: bytes)
             entry.attributes.size = UInt64(entry.contents.count)
             self.files[key] = entry
             return .status(.init(code: .ok))
@@ -306,7 +307,7 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
             }
             return .attributes(entry.attributes)
         case .fstat(let handle):
-            guard let path = self.fileHandles[String(decoding: handle, as: UTF8.self)],
+            guard let path = self.fileHandles[String(buffer: handle)],
                 let entry = self.files[path]
             else {
                 return .status(.init(code: .failure))
@@ -322,7 +323,7 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
             self.files[path] = entry
             return .status(.init(code: .ok))
         case .fsetstat(let handle, let attributes):
-            guard let path = self.fileHandles[String(decoding: handle, as: UTF8.self)] else {
+            guard let path = self.fileHandles[String(buffer: handle)] else {
                 return .status(.init(code: .failure))
             }
             return self.handle(request: .setstat(path: path, attributes: attributes))
@@ -354,8 +355,8 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
         }
     }
 
-    private func handleExtendedRequest(name: String, data: [UInt8]) -> SFTPResponseMessage {
-        var payload = ByteBuffer(bytes: data)
+    private func handleExtendedRequest(name: String, data: ByteBuffer) -> SFTPResponseMessage {
+        var payload = data
 
         switch name {
         case SFTPExtensionName.posixRename.rawValue:
@@ -369,7 +370,7 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
             guard let handle = payload.readSFTPStringBuffer() else {
                 return .status(.init(code: .failure, message: "invalid fsync payload"))
             }
-            let handleKey = String(decoding: handle.readableBytesView, as: UTF8.self)
+            let handleKey = String(buffer: handle)
             return self.fileHandles[handleKey] == nil ? .status(.init(code: .failure, message: "invalid file handle")) : .status(.init(code: .ok))
         case SFTPExtensionName.statvfs.rawValue:
             guard let path = payload.readSFTPString(), self.directories.contains(path) || self.files[path] != nil else {
@@ -380,7 +381,7 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
             guard let handle = payload.readSFTPStringBuffer() else {
                 return .status(.init(code: .failure, message: "invalid fstatvfs payload"))
             }
-            let handleKey = String(decoding: handle.readableBytesView, as: UTF8.self)
+            let handleKey = String(buffer: handle)
             return self.fileHandles[handleKey] == nil ? .status(.init(code: .failure, message: "invalid file handle")) : .extendedReply(self.encodedFileSystemAttributes())
         case SFTPExtensionName.hardlink.rawValue:
             guard let oldPath = payload.readSFTPString(), let newPath = payload.readSFTPString(), let entry = self.files[oldPath] else {
@@ -398,8 +399,8 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
             else {
                 return .status(.init(code: .failure, message: "invalid copy-data payload"))
             }
-            let readKey = String(decoding: readHandle.readableBytesView, as: UTF8.self)
-            let writeKey = String(decoding: writeHandle.readableBytesView, as: UTF8.self)
+            let readKey = String(buffer: readHandle)
+            let writeKey = String(buffer: writeHandle)
             guard let readPath = self.fileHandles[readKey], let writePath = self.fileHandles[writeKey], var destination = self.files[writePath], let source = self.files[readPath] else {
                 return .status(.init(code: .failure, message: "invalid file handle"))
             }
@@ -426,10 +427,10 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
         }
     }
 
-    private func encodedFileSystemAttributes() -> [UInt8] {
+    private func encodedFileSystemAttributes() -> ByteBuffer {
         var buffer = ByteBufferAllocator().buffer(capacity: 128)
         buffer.writeSFTPFileSystemAttributes(self.fileSystemAttributes)
-        return Array(buffer.readableBytesView)
+        return buffer
     }
 
     private func write(_ buffer: ByteBuffer, context: ChannelHandlerContext) {

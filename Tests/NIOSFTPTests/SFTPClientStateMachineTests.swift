@@ -21,7 +21,7 @@ import XCTest
 final class SFTPClientStateMachineTests: XCTestCase {
     func testStartupFlowTransitionsToReady() {
         var stateMachine = SFTPClientStateMachine()
-        let extensions = [SFTPExtension(name: SFTPExtensionName.fsync.rawValue, data: Array("1".utf8))]
+        let extensions = [SFTPExtension(name: SFTPExtensionName.fsync.rawValue, data: ByteBuffer(string: "1"))]
 
         assertAction(stateMachine.beginStartupIfNeeded(channelIsActive: false), matches: .none)
         assertAction(stateMachine.beginStartupIfNeeded(channelIsActive: true), matches: .sendSubsystemRequest)
@@ -102,14 +102,15 @@ final class SFTPClientStateMachineTests: XCTestCase {
         _ = stateMachine.receivePacket(.version(.v3, []))
 
         let promise = loop.makePromise(of: SFTPResponseMessage.self)
-        let requestID = try! stateMachine.enqueueRequest(.read(handle: [1, 2, 3], offset: 0, length: 8), promise: promise)
+        let requestID = try! stateMachine.enqueueRequest(.read(handle: ByteBuffer(bytes: [1, 2, 3]), offset: 0, length: 8), promise: promise)
 
-        guard case .requestSucceeded(let promise, let response) = stateMachine.receivePacket(.response(id: requestID, .data([1, 2, 3]))) else {
+        let payload = ByteBuffer(bytes: [1, 2, 3])
+        guard case .requestSucceeded(let promise, let response) = stateMachine.receivePacket(.response(id: requestID, .data(payload))) else {
             return XCTFail("Expected successful read response")
         }
 
         promise.succeed(response)
-        XCTAssertEqual(response, .data([1, 2, 3]))
+        XCTAssertEqual(response, .data(payload))
     }
 
     private func assertAction(_ action: SFTPClientStateMachine.Action, matches expected: StaticAction) {

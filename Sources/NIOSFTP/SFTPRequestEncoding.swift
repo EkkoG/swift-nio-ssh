@@ -25,25 +25,25 @@ enum SFTPRequestEncoder {
                 body.writeInteger(pflags.rawValue)
                 body.writeSFTPAttributes(attributes)
             case .close(let handle):
-                body.writeSFTPString(handle)
+                body.writeSFTPImmutableStringBuffer(handle)
             case .read(let handle, let offset, let length):
-                body.writeSFTPString(handle)
+                body.writeSFTPImmutableStringBuffer(handle)
                 body.writeInteger(offset)
                 body.writeInteger(length)
             case .write(let handle, let offset, let data):
-                body.writeSFTPString(handle)
+                body.writeSFTPImmutableStringBuffer(handle)
                 body.writeInteger(offset)
-                body.writeSFTPString(data)
+                body.writeSFTPImmutableStringBuffer(data)
             case .lstat(let path), .opendir(let path), .remove(let path), .rmdir(let path), .realpath(let path),
                  .stat(let path), .readlink(let path):
                 body.writeSFTPString(path)
             case .fstat(let handle), .readdir(let handle):
-                body.writeSFTPString(handle)
+                body.writeSFTPImmutableStringBuffer(handle)
             case .setstat(let path, let attributes):
                 body.writeSFTPString(path)
                 body.writeSFTPAttributes(attributes)
             case .fsetstat(let handle, let attributes):
-                body.writeSFTPString(handle)
+                body.writeSFTPImmutableStringBuffer(handle)
                 body.writeSFTPAttributes(attributes)
             case .mkdir(let path, let attributes):
                 body.writeSFTPString(path)
@@ -56,7 +56,8 @@ enum SFTPRequestEncoder {
                 body.writeSFTPString(linkPath)
             case .extended(let name, let data):
                 body.writeSFTPString(name)
-                body.writeBytes(data)
+                var data = data
+                body.writeBuffer(&data)
             }
         }
         return buffer

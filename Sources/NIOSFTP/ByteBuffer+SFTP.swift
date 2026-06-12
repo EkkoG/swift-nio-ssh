@@ -47,6 +47,12 @@ extension ByteBuffer {
         return written + bufferWritten
     }
 
+    @discardableResult
+    mutating func writeSFTPImmutableStringBuffer(_ value: ByteBuffer) -> Int {
+        var copy = value
+        return self.writeSFTPStringBuffer(&copy)
+    }
+
     mutating func readSFTPFrame() throws -> SFTPInboundPacket? {
         guard let length = self.getInteger(at: self.readerIndex, as: UInt32.self) else {
             return nil

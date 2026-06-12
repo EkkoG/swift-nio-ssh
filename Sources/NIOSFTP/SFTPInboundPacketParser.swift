@@ -33,7 +33,7 @@ enum SFTPInboundPacketParser {
                 guard let name = payload.readSFTPString(), let data = payload.readSFTPStringBuffer() else {
                     throw SFTPError.protocolViolation("Invalid SFTP extension payload")
                 }
-                extensions.append(.init(name: name, data: Array(data.readableBytesView)))
+                extensions.append(.init(name: name, data: data))
             }
             return .version(.init(version), extensions)
         case SFTPPacketType.status:
@@ -51,14 +51,14 @@ enum SFTPInboundPacketParser {
             else {
                 throw SFTPError.protocolViolation("Invalid HANDLE packet")
             }
-            return .response(id: id, .handle(Array(handle.readableBytesView)))
+            return .response(id: id, .handle(handle))
         case SFTPPacketType.data:
             guard let id = payload.readInteger(as: UInt32.self),
                 let data = payload.readSFTPStringBuffer()
             else {
                 throw SFTPError.protocolViolation("Invalid DATA packet")
             }
-            return .response(id: id, .data(Array(data.readableBytesView)))
+            return .response(id: id, .data(data))
         case SFTPPacketType.name:
             guard let id = payload.readInteger(as: UInt32.self),
                 let count = payload.readInteger(as: UInt32.self)
@@ -87,7 +87,7 @@ enum SFTPInboundPacketParser {
             guard let id = payload.readInteger(as: UInt32.self) else {
                 throw SFTPError.protocolViolation("Invalid EXTENDED_REPLY packet")
             }
-            return .response(id: id, .extendedReply(Array(payload.readableBytesView)))
+            return .response(id: id, .extendedReply(payload))
         default:
             throw SFTPError.protocolViolation("Unsupported SFTP packet type \(type)")
         }

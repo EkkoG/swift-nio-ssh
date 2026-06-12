@@ -63,6 +63,10 @@ public final class SFTPClient: @unchecked Sendable {
     }
 
     public func send(_ message: SFTPRequestMessage) -> EventLoopFuture<SFTPResponseMessage> {
+        if self.channel.eventLoop.inEventLoop {
+            return self.handler.send(message)
+        }
+
         let promise = self.channel.eventLoop.makePromise(of: SFTPResponseMessage.self)
         self.channel.eventLoop.execute {
             promise.completeWith(self.handler.send(message))
@@ -102,9 +106,7 @@ public final class SFTPClient: @unchecked Sendable {
     public func read(file: SFTPFileHandle, offset: UInt64, length: UInt32) -> EventLoopFuture<ByteBuffer?> {
         self.send(.read(handle: file.bytes, offset: offset, length: length)).flatMapThrowing { response in
             switch response {
-            case .data(let bytes):
-                var buffer = self.channel.allocator.buffer(capacity: bytes.count)
-                buffer.writeBytes(bytes)
+            case .data(let buffer):
                 return buffer
             case .status(let status) where status.code == .eof:
                 return nil
@@ -117,7 +119,7 @@ public final class SFTPClient: @unchecked Sendable {
     }
 
     public func write(file: SFTPFileHandle, offset: UInt64, data: ByteBuffer) -> EventLoopFuture<Void> {
-        self.writeHandle(file.bytes, offset: offset, data: Array(data.readableBytesView))
+        self.writeHandle(file.bytes, offset: offset, data: data)
     }
 
     public func openDirectory(path: String) -> EventLoopFuture<SFTPDirectoryHandle> {
@@ -229,7 +231,7 @@ public final class SFTPClient: @unchecked Sendable {
 
     public func fsync(file: SFTPFileHandle) -> EventLoopFuture<Void> {
         self.extendedStatusOnly(.fsync, operation: "FSYNC") { body in
-            body.writeSFTPString(file.bytes)
+            body.writeSFTPImmutableStringBuffer(file.bytes)
         }
     }
 
@@ -243,7 +245,7 @@ public final class SFTPClient: @unchecked Sendable {
 
     public func fstatvfs(file: SFTPFileHandle) -> EventLoopFuture<SFTPFileSystemAttributes> {
         self.extendedReply(.fstatvfs, operation: "FSTATVFS") { body in
-            body.writeSFTPString(file.bytes)
+            body.writeSFTPImmutableStringBuffer(file.bytes)
         } decode: { payload in
             try payload.readSFTPFileSystemAttributes()
         }
@@ -264,19 +266,19 @@ public final class SFTPClient: @unchecked Sendable {
         writeOffset: UInt64
     ) -> EventLoopFuture<Void> {
         self.extendedStatusOnly(.copyData, operation: "COPY_DATA") { body in
-            body.writeSFTPString(source.bytes)
+            body.writeSFTPImmutableStringBuffer(source.bytes)
             body.writeInteger(readOffset)
             body.writeInteger(length)
-            body.writeSFTPString(destination.bytes)
+            body.writeSFTPImmutableStringBuffer(destination.bytes)
             body.writeInteger(writeOffset)
         }
     }
 
-    private func closeHandle(_ handle: [UInt8]) -> EventLoopFuture<Void> {
+    private func closeHandle(_ handle: ByteBuffer) -> EventLoopFuture<Void> {
         self.statusOnly(.close(handle: handle), operation: "CLOSE")
     }
 
-    private func writeHandle(_ handle: [UInt8], offset: UInt64, data: [UInt8]) -> EventLoopFuture<Void> {
+    private func writeHandle(_ handle: ByteBuffer, offset: UInt64, data: ByteBuffer) -> EventLoopFuture<Void> {
         self.statusOnly(.write(handle: handle, offset: offset, data: data), operation: "WRITE")
     }
 
@@ -331,9 +333,7 @@ public final class SFTPClient: @unchecked Sendable {
     ) -> EventLoopFuture<T> {
         self.extendedRequest(extensionName, operation: operation, payloadWriter: payloadWriter).flatMapThrowing { response in
             switch response {
-            case .extendedReply(let bytes):
-                var payload = self.channel.allocator.buffer(capacity: bytes.count)
-                payload.writeBytes(bytes)
+            case .extendedReply(var payload):
                 return try decode(&payload)
             case .status(let status):
                 throw SFTPError.status(status)
@@ -354,7 +354,7 @@ public final class SFTPClient: @unchecked Sendable {
 
         var payload = self.channel.allocator.buffer(capacity: 128)
         payloadWriter(&payload)
-        return self.send(.extended(name: extensionName.rawValue, data: Array(payload.readableBytesView)))
+        return self.send(.extended(name: extensionName.rawValue, data: payload))
             .flatMapThrowing { response in
                 if case .status(let status) = response, status.code == .operationUnsupported {
                     throw SFTPError.unsupportedExtension(extensionName)

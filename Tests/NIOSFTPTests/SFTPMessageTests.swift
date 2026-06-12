@@ -18,11 +18,15 @@ import XCTest
 @testable import NIOSFTP
 
 final class SFTPMessageTests: XCTestCase {
+    private func buffer(_ string: String) -> ByteBuffer {
+        ByteBuffer(string: string)
+    }
+
     func testVersionFrameRoundTrip() throws {
         let allocator = ByteBufferAllocator()
         let encodedFrame = SFTPResponseEncoder.encodeVersion(
             .v3,
-            extensions: [.init(name: "posix-rename@openssh.com", data: Array("1".utf8))],
+            extensions: [.init(name: "posix-rename@openssh.com", data: self.buffer("1"))],
             allocator: allocator
         )
 
@@ -30,7 +34,7 @@ final class SFTPMessageTests: XCTestCase {
         let frame = try buffer.readSFTPFrame()
         XCTAssertEqual(
             frame,
-            SFTPInboundPacket.version(.v3, [.init(name: "posix-rename@openssh.com", data: Array("1".utf8))])
+            SFTPInboundPacket.version(.v3, [.init(name: "posix-rename@openssh.com", data: self.buffer("1"))])
         )
         XCTAssertEqual(buffer.readableBytes, 0)
     }
@@ -86,7 +90,7 @@ final class SFTPMessageTests: XCTestCase {
         payload.writeSFTPString("/tmp/destination")
 
         let requestFrame = SFTPRequestEncoder.encode(
-            .extended(name: SFTPExtensionName.posixRename.rawValue, data: Array(payload.readableBytesView)),
+            .extended(name: SFTPExtensionName.posixRename.rawValue, data: payload),
             requestID: 7,
             allocator: allocator
         )
@@ -102,6 +106,6 @@ final class SFTPMessageTests: XCTestCase {
 
         let decoded = try SFTPRequestDecoder.decode(type: type, payload: framePayload)
         XCTAssertEqual(decoded.0, 7)
-        XCTAssertEqual(decoded.1, .extended(name: SFTPExtensionName.posixRename.rawValue, data: Array(payload.readableBytesView)))
+        XCTAssertEqual(decoded.1, .extended(name: SFTPExtensionName.posixRename.rawValue, data: payload))
     }
 }

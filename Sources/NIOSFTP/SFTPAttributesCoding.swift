@@ -66,7 +66,7 @@ extension ByteBuffer {
                 guard let name = self.readSFTPString(), let data = self.readSFTPStringBuffer() else {
                     throw SFTPError.protocolViolation("Invalid SFTP extended attribute")
                 }
-                extensions.append(.init(name: name, data: Array(data.readableBytesView)))
+                extensions.append(.init(name: name, data: data))
             }
             attributes.extended = extensions
         }
@@ -94,7 +94,7 @@ extension ByteBuffer {
             written += self.writeInteger(UInt32(attributes.extended.count))
             for extensionData in attributes.extended {
                 written += self.writeSFTPString(extensionData.name)
-                written += self.writeSFTPString(extensionData.data)
+                written += self.writeSFTPImmutableStringBuffer(extensionData.data)
             }
         }
         return written

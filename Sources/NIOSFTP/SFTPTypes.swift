@@ -26,9 +26,9 @@ public struct SFTPVersion: Sendable, Equatable {
 
 public struct SFTPExtension: Sendable, Equatable {
     public var name: String
-    public var data: [UInt8]
+    public var data: ByteBuffer
 
-    public init(name: String, data: [UInt8]) {
+    public init(name: String, data: ByteBuffer) {
         self.name = name
         self.data = data
     }
@@ -63,7 +63,7 @@ public struct SFTPServerCapabilities: Sendable, Equatable {
             grouping: rawExtensions,
             by: \.name
         ).mapValues { entries in
-            entries.map { String(decoding: $0.data, as: UTF8.self) }
+            entries.map { String(decoding: $0.data.readableBytesView, as: UTF8.self) }
         }
     }
 
@@ -135,18 +135,18 @@ public struct SFTPFileSystemAttributes: Sendable, Equatable {
     }
 }
 
-public struct SFTPFileHandle: Sendable, Hashable, Equatable {
-    public var bytes: [UInt8]
+public struct SFTPFileHandle: Sendable, Equatable {
+    public var bytes: ByteBuffer
 
-    public init(bytes: [UInt8]) {
+    public init(bytes: ByteBuffer) {
         self.bytes = bytes
     }
 }
 
-public struct SFTPDirectoryHandle: Sendable, Hashable, Equatable {
-    public var bytes: [UInt8]
+public struct SFTPDirectoryHandle: Sendable, Equatable {
+    public var bytes: ByteBuffer
 
-    public init(bytes: [UInt8]) {
+    public init(bytes: ByteBuffer) {
         self.bytes = bytes
     }
 }
@@ -298,15 +298,15 @@ public struct SFTPStatus: Sendable, Equatable {
 
 public enum SFTPRequestMessage: Sendable, Equatable {
     case open(path: String, pflags: SFTPOpenFlags, attributes: SFTPAttributes)
-    case close(handle: [UInt8])
-    case read(handle: [UInt8], offset: UInt64, length: UInt32)
-    case write(handle: [UInt8], offset: UInt64, data: [UInt8])
+    case close(handle: ByteBuffer)
+    case read(handle: ByteBuffer, offset: UInt64, length: UInt32)
+    case write(handle: ByteBuffer, offset: UInt64, data: ByteBuffer)
     case lstat(path: String)
-    case fstat(handle: [UInt8])
+    case fstat(handle: ByteBuffer)
     case setstat(path: String, attributes: SFTPAttributes)
-    case fsetstat(handle: [UInt8], attributes: SFTPAttributes)
+    case fsetstat(handle: ByteBuffer, attributes: SFTPAttributes)
     case opendir(path: String)
-    case readdir(handle: [UInt8])
+    case readdir(handle: ByteBuffer)
     case remove(path: String)
     case mkdir(path: String, attributes: SFTPAttributes)
     case rmdir(path: String)
@@ -315,16 +315,16 @@ public enum SFTPRequestMessage: Sendable, Equatable {
     case rename(oldPath: String, newPath: String)
     case readlink(path: String)
     case symlink(linkPath: String, targetPath: String)
-    case extended(name: String, data: [UInt8])
+    case extended(name: String, data: ByteBuffer)
 }
 
 public enum SFTPResponseMessage: Sendable, Equatable {
     case status(SFTPStatus)
-    case handle([UInt8])
-    case data([UInt8])
+    case handle(ByteBuffer)
+    case data(ByteBuffer)
     case name([SFTPNameEntry])
     case attributes(SFTPAttributes)
-    case extendedReply([UInt8])
+    case extendedReply(ByteBuffer)
 }
 
 public enum SFTPError: Error, Sendable, Equatable {
