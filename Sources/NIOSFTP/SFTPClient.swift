@@ -36,19 +36,21 @@ public final class SFTPClient: @unchecked Sendable {
 
     public static func openChannel(with sshHandler: NIOSSHHandler, on channel: Channel) -> EventLoopFuture<SFTPClient> {
         let sftpPromise = channel.eventLoop.makePromise(of: SFTPClient.self)
+        let loopBoundSSHHandler = NIOLoopBound(sshHandler, eventLoop: channel.eventLoop)
+        let loopBoundPromise = NIOLoopBound(sftpPromise, eventLoop: channel.eventLoop)
 
         channel.eventLoop.execute {
-            sshHandler.createChannel(nil, channelType: .session) { childChannel, channelType in
+            loopBoundSSHHandler.value.createChannel(nil, channelType: .session) { childChannel, channelType in
                 guard channelType == .session else {
                     return childChannel.eventLoop.makeFailedFuture(SFTPError.invalidChannelType)
                 }
 
                 let handler = SFTPClientHandler(loop: childChannel.eventLoop, allocator: childChannel.allocator)
                 let client = SFTPClient(channel: childChannel, handler: handler)
-                sftpPromise.completeWith(handler.startupFuture.map { client })
+                loopBoundPromise.value.completeWith(handler.startupFuture.map { client })
 
                 return childChannel.pipeline.addHandler(handler).flatMapError { error in
-                    sftpPromise.fail(error)
+                    loopBoundPromise.value.fail(error)
                     return childChannel.eventLoop.makeFailedFuture(error)
                 }
             }

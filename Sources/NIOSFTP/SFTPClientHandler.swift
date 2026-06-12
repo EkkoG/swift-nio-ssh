@@ -20,29 +20,12 @@ final class SFTPClientHandler: ChannelDuplexHandler, @unchecked Sendable {
     typealias OutboundIn = Never
     typealias OutboundOut = SSHChannelData
 
-    enum Phase {
-        case idle
-        case waitingForSubsystemReply
-        case waitingForVersion
-        case ready
-        case closed
-    }
-
-    private struct PendingRequest {
-        var message: SFTPRequestMessage
-        var promise: EventLoopPromise<SFTPResponseMessage>
-    }
-
     private(set) var startupFuture: EventLoopFuture<Void>
 
     private let startupPromise: EventLoopPromise<Void>
-    private var phase: Phase = .idle
+    private var stateMachine = SFTPClientStateMachine()
     private var context: ChannelHandlerContext?
     private var inboundBuffer: ByteBuffer
-    private var nextRequestID: UInt32 = 0
-    private var pendingRequests: [UInt32: PendingRequest] = [:]
-    private var isFailing = false
-    private var startupResolved = false
 
     init(loop: EventLoop, allocator: ByteBufferAllocator) {
         self.startupPromise = loop.makePromise(of: Void.self)
@@ -53,34 +36,35 @@ final class SFTPClientHandler: ChannelDuplexHandler, @unchecked Sendable {
     func handlerAdded(context: ChannelHandlerContext) {
         self.context = context
         context.channel.setOption(ChannelOptions.allowRemoteHalfClosure, value: true).whenFailure { _ in }
-        self.beginStartupIfNeeded(context: context)
+        self.execute(self.stateMachine.beginStartupIfNeeded(channelIsActive: context.channel.isActive), context: context)
     }
 
     func channelActive(context: ChannelHandlerContext) {
-        self.beginStartupIfNeeded(context: context)
+        self.execute(self.stateMachine.beginStartupIfNeeded(channelIsActive: context.channel.isActive), context: context)
         context.fireChannelActive()
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        self.failAll(error: SFTPError.channelClosed, context: context)
+        self.execute(self.stateMachine.failSession(error: SFTPError.channelClosed), context: context)
         context.fireChannelInactive()
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         switch event {
         case is ChannelSuccessEvent:
-            guard self.phase == .waitingForSubsystemReply else {
+            let action = self.stateMachine.receiveSubsystemSuccess()
+            if case .none = action {
                 context.fireUserInboundEventTriggered(event)
-                return
+            } else {
+                self.execute(action, context: context)
             }
-            self.phase = .waitingForVersion
-            self.writeAndFlush(buffer: SFTPRequestEncoder.encodeInit(version: .v3, allocator: context.channel.allocator), context: context, promise: nil)
         case is ChannelFailureEvent:
-            if self.phase == .waitingForSubsystemReply {
-                self.failAll(error: SFTPError.subsystemRejected, context: context)
-                return
+            let action = self.stateMachine.receiveSubsystemFailure()
+            if case .none = action {
+                context.fireUserInboundEventTriggered(event)
+            } else {
+                self.execute(action, context: context)
             }
-            context.fireUserInboundEventTriggered(event)
         default:
             context.fireUserInboundEventTriggered(event)
         }
@@ -89,7 +73,10 @@ final class SFTPClientHandler: ChannelDuplexHandler, @unchecked Sendable {
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let data = self.unwrapInboundIn(data)
         guard case .byteBuffer(let bytes) = data.data else {
-            self.failAll(error: SFTPError.protocolViolation("Unsupported SSH IOData payload"), context: context)
+            self.execute(
+                self.stateMachine.failSession(error: SFTPError.protocolViolation("Unsupported SSH IOData payload")),
+                context: context
+            )
             return
         }
 
@@ -100,17 +87,20 @@ final class SFTPClientHandler: ChannelDuplexHandler, @unchecked Sendable {
             do {
                 try self.processInbound(context: context)
             } catch {
-                self.failAll(error: error, context: context)
+                self.execute(self.stateMachine.failSession(error: error), context: context)
             }
         case .stdErr:
             context.fireUserInboundEventTriggered(SFTPClientEvent(standardError: bytes))
         default:
-            self.failAll(error: SFTPError.protocolViolation("Unsupported SSH extended data stream"), context: context)
+            self.execute(
+                self.stateMachine.failSession(error: SFTPError.protocolViolation("Unsupported SSH extended data stream")),
+                context: context
+            )
         }
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        self.failAll(error: error, context: context)
+        self.execute(self.stateMachine.failSession(error: error), context: context)
         context.fireErrorCaught(error)
     }
 
@@ -118,91 +108,60 @@ final class SFTPClientHandler: ChannelDuplexHandler, @unchecked Sendable {
         guard let context = self.context else {
             return self.startupPromise.futureResult.eventLoop.makeFailedFuture(SFTPError.sessionNotReady)
         }
-        guard self.phase == .ready else {
-            return context.eventLoop.makeFailedFuture(SFTPError.sessionNotReady)
-        }
 
-        let requestID = self.allocateRequestID()
         let promise = context.eventLoop.makePromise(of: SFTPResponseMessage.self)
-        self.pendingRequests[requestID] = .init(message: message, promise: promise)
+        let requestID: UInt32
+        do {
+            requestID = try self.stateMachine.enqueueRequest(message, promise: promise)
+        } catch {
+            promise.fail(error)
+            return promise.futureResult
+        }
         let buffer = SFTPRequestEncoder.encode(message, requestID: requestID, allocator: context.channel.allocator)
-        self.writeAndFlush(buffer: buffer, context: context, promise: promise)
+        self.writeAndFlush(buffer: buffer, context: context)
         return promise.futureResult
     }
 
-    private func writeAndFlush(
-        buffer: ByteBuffer,
-        context: ChannelHandlerContext,
-        promise: EventLoopPromise<SFTPResponseMessage>?
-    ) {
+    private func writeAndFlush(buffer: ByteBuffer, context: ChannelHandlerContext) {
         let loopBoundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
         let wrapped = self.wrapOutboundOut(.init(type: .channel, data: .byteBuffer(buffer)))
         context.writeAndFlush(wrapped).whenFailure { error in
-            if let promise {
-                promise.fail(error)
-            }
-            self.failAll(error: error, context: loopBoundContext.value)
+            self.execute(self.stateMachine.failSession(error: error), context: loopBoundContext.value)
         }
     }
 
     private func processInbound(context: ChannelHandlerContext) throws {
         while let packet = try self.inboundBuffer.readSFTPFrame() {
-            switch packet {
-            case .version(let version, _):
-                guard self.phase == .waitingForVersion else {
-                    throw SFTPError.unexpectedResponse("Received VERSION outside startup")
-                }
-                guard version == .v3 else {
-                    throw SFTPError.unsupportedVersion(version.rawValue)
-                }
-                self.phase = .ready
-                self.startupResolved = true
-                self.startupPromise.succeed(())
-            case .response(let requestID, let response):
-                guard let pending = self.pendingRequests.removeValue(forKey: requestID) else {
-                    throw SFTPError.unexpectedResponse("Received response for unknown request id \(requestID)")
-                }
-                pending.promise.succeed(response)
+            self.execute(self.stateMachine.receivePacket(packet), context: context)
+        }
+    }
+
+    private func execute(_ action: SFTPClientStateMachine.Action, context: ChannelHandlerContext) {
+        switch action {
+        case .none:
+            return
+        case .sendSubsystemRequest:
+            let loopBoundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
+            context.triggerUserOutboundEvent(
+                SSHChannelRequestEvent.SubsystemRequest(subsystem: "sftp", wantReply: true)
+            ).whenFailure { error in
+                self.execute(self.stateMachine.failSession(error: error), context: loopBoundContext.value)
             }
+        case .sendInit:
+            self.writeAndFlush(
+                buffer: SFTPRequestEncoder.encodeInit(version: .v3, allocator: context.channel.allocator),
+                context: context
+            )
+        case .startupSucceeded:
+            self.startupPromise.succeed(())
+        case .requestSucceeded(let promise, let response):
+            promise.succeed(response)
+        case .sessionFailed(let error, let failStartup, let pendingPromises):
+            if failStartup {
+                self.startupPromise.fail(error)
+            }
+            pendingPromises.forEach { $0.fail(error) }
+            context.close(promise: nil)
         }
-    }
-
-    private func allocateRequestID() -> UInt32 {
-        while self.pendingRequests[self.nextRequestID] != nil {
-            self.nextRequestID &+= 1
-        }
-        defer {
-            self.nextRequestID &+= 1
-        }
-        return self.nextRequestID
-    }
-
-    private func beginStartupIfNeeded(context: ChannelHandlerContext) {
-        guard self.phase == .idle, context.channel.isActive else {
-            return
-        }
-        self.phase = .waitingForSubsystemReply
-        let loopBoundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
-        context.triggerUserOutboundEvent(
-            SSHChannelRequestEvent.SubsystemRequest(subsystem: "sftp", wantReply: true)
-        ).whenFailure { error in
-            self.failAll(error: error, context: loopBoundContext.value)
-        }
-    }
-
-    private func failAll(error: Error, context: ChannelHandlerContext) {
-        guard !self.isFailing else {
-            return
-        }
-        self.isFailing = true
-        self.phase = .closed
-        if !self.startupResolved {
-            self.startupResolved = true
-            self.startupPromise.fail(error)
-        }
-        let pending = self.pendingRequests.values
-        self.pendingRequests.removeAll()
-        pending.forEach { $0.promise.fail(error) }
-        context.close(promise: nil)
     }
 }
