@@ -34,7 +34,8 @@ let package = Package(
         .tvOS(.v13),
     ],
     products: [
-        .library(name: "NIOSSH", targets: ["NIOSSH"])
+        .library(name: "NIOSSH", targets: ["NIOSSH"]),
+        .library(name: "NIOSFTP", targets: ["NIOSFTP"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
@@ -53,6 +54,14 @@ let package = Package(
             ],
             swiftSettings: swiftSettings
         ),
+        .target(
+            name: "NIOSFTP",
+            dependencies: [
+                "NIOSSH",
+                .product(name: "NIOCore", package: "swift-nio"),
+            ],
+            swiftSettings: swiftSettings
+        ),
         .executableTarget(
             name: "NIOSSHClient",
             dependencies: [
@@ -60,6 +69,16 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+            ],
+            swiftSettings: swiftSettings
+        ),
+        .executableTarget(
+            name: "NIOSFTPWhiteboxDemo",
+            dependencies: [
+                "NIOSSH",
+                "NIOSFTP",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
             ],
             swiftSettings: swiftSettings
         ),
@@ -91,6 +110,16 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
+            ],
+            swiftSettings: swiftSettings
+        ),
+        .testTarget(
+            name: "NIOSFTPTests",
+            dependencies: [
+                "NIOSFTP",
+                "NIOSSH",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
             swiftSettings: swiftSettings
         ),

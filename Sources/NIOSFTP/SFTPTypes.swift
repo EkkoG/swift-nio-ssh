@@ -1,0 +1,246 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the SwiftNIO open source project
+//
+// Copyright (c) 2026 Apple Inc. and the SwiftNIO project authors
+// Licensed under Apache License v2.0
+//
+// See LICENSE.txt for license information
+// See CONTRIBUTORS.txt for the list of SwiftNIO project authors
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+//===----------------------------------------------------------------------===//
+
+import NIOCore
+
+public struct SFTPVersion: Sendable, Equatable {
+    public var rawValue: UInt32
+
+    public init(_ rawValue: UInt32) {
+        self.rawValue = rawValue
+    }
+
+    public static let v3 = SFTPVersion(3)
+}
+
+public struct SFTPExtension: Sendable, Equatable {
+    public var name: String
+    public var data: [UInt8]
+
+    public init(name: String, data: [UInt8]) {
+        self.name = name
+        self.data = data
+    }
+}
+
+public struct SFTPFileHandle: Sendable, Hashable, Equatable {
+    public var bytes: [UInt8]
+
+    public init(bytes: [UInt8]) {
+        self.bytes = bytes
+    }
+}
+
+public struct SFTPDirectoryHandle: Sendable, Hashable, Equatable {
+    public var bytes: [UInt8]
+
+    public init(bytes: [UInt8]) {
+        self.bytes = bytes
+    }
+}
+
+public struct SFTPNameEntry: Sendable, Equatable {
+    public var filename: String
+    public var longname: String
+    public var attributes: SFTPAttributes
+
+    public init(filename: String, longname: String, attributes: SFTPAttributes) {
+        self.filename = filename
+        self.longname = longname
+        self.attributes = attributes
+    }
+}
+
+public struct SFTPOpenFlags: OptionSet, Sendable, Hashable {
+    public let rawValue: UInt32
+
+    public init(rawValue: UInt32) {
+        self.rawValue = rawValue
+    }
+
+    public static let read = SFTPOpenFlags(rawValue: 0x00000001)
+    public static let write = SFTPOpenFlags(rawValue: 0x00000002)
+    public static let append = SFTPOpenFlags(rawValue: 0x00000004)
+    public static let create = SFTPOpenFlags(rawValue: 0x00000008)
+    public static let truncate = SFTPOpenFlags(rawValue: 0x00000010)
+    public static let exclusive = SFTPOpenFlags(rawValue: 0x00000020)
+}
+
+public struct SFTPAttributeFlags: OptionSet, Sendable, Hashable {
+    public let rawValue: UInt32
+
+    public init(rawValue: UInt32) {
+        self.rawValue = rawValue
+    }
+
+    public static let size = SFTPAttributeFlags(rawValue: 0x00000001)
+    public static let uidgid = SFTPAttributeFlags(rawValue: 0x00000002)
+    public static let permissions = SFTPAttributeFlags(rawValue: 0x00000004)
+    public static let acmodtime = SFTPAttributeFlags(rawValue: 0x00000008)
+    public static let extended = SFTPAttributeFlags(rawValue: 0x80000000)
+    static let supported: SFTPAttributeFlags = [.size, .uidgid, .permissions, .acmodtime, .extended]
+}
+
+public struct SFTPAttributes: Sendable, Equatable {
+    public var size: UInt64?
+    public var uid: UInt32?
+    public var gid: UInt32?
+    public var permissions: UInt32?
+    public var accessTime: UInt32?
+    public var modificationTime: UInt32?
+    public var extended: [SFTPExtension]
+
+    public init(
+        size: UInt64? = nil,
+        uid: UInt32? = nil,
+        gid: UInt32? = nil,
+        permissions: UInt32? = nil,
+        accessTime: UInt32? = nil,
+        modificationTime: UInt32? = nil,
+        extended: [SFTPExtension] = []
+    ) {
+        self.size = size
+        self.uid = uid
+        self.gid = gid
+        self.permissions = permissions
+        self.accessTime = accessTime
+        self.modificationTime = modificationTime
+        self.extended = extended
+    }
+
+    var flags: SFTPAttributeFlags {
+        var flags: SFTPAttributeFlags = []
+        if self.size != nil {
+            flags.insert(.size)
+        }
+        if self.uid != nil || self.gid != nil {
+            flags.insert(.uidgid)
+        }
+        if self.permissions != nil {
+            flags.insert(.permissions)
+        }
+        if self.accessTime != nil || self.modificationTime != nil {
+            flags.insert(.acmodtime)
+        }
+        if !self.extended.isEmpty {
+            flags.insert(.extended)
+        }
+        return flags
+    }
+}
+
+public enum SFTPStatusCode: Sendable, Equatable {
+    case ok
+    case eof
+    case noSuchFile
+    case permissionDenied
+    case failure
+    case badMessage
+    case noConnection
+    case connectionLost
+    case operationUnsupported
+    case unknown(UInt32)
+
+    init(rawValue: UInt32) {
+        switch rawValue {
+        case 0: self = .ok
+        case 1: self = .eof
+        case 2: self = .noSuchFile
+        case 3: self = .permissionDenied
+        case 4: self = .failure
+        case 5: self = .badMessage
+        case 6: self = .noConnection
+        case 7: self = .connectionLost
+        case 8: self = .operationUnsupported
+        default: self = .unknown(rawValue)
+        }
+    }
+
+    var rawValue: UInt32 {
+        switch self {
+        case .ok: return 0
+        case .eof: return 1
+        case .noSuchFile: return 2
+        case .permissionDenied: return 3
+        case .failure: return 4
+        case .badMessage: return 5
+        case .noConnection: return 6
+        case .connectionLost: return 7
+        case .operationUnsupported: return 8
+        case .unknown(let value): return value
+        }
+    }
+}
+
+public struct SFTPStatus: Sendable, Equatable {
+    public var code: SFTPStatusCode
+    public var message: String
+    public var languageTag: String
+
+    public init(code: SFTPStatusCode, message: String = "", languageTag: String = "") {
+        self.code = code
+        self.message = message
+        self.languageTag = languageTag
+    }
+}
+
+public enum SFTPRequestMessage: Sendable, Equatable {
+    case open(path: String, pflags: SFTPOpenFlags, attributes: SFTPAttributes)
+    case close(handle: [UInt8])
+    case read(handle: [UInt8], offset: UInt64, length: UInt32)
+    case write(handle: [UInt8], offset: UInt64, data: [UInt8])
+    case lstat(path: String)
+    case fstat(handle: [UInt8])
+    case setstat(path: String, attributes: SFTPAttributes)
+    case fsetstat(handle: [UInt8], attributes: SFTPAttributes)
+    case opendir(path: String)
+    case readdir(handle: [UInt8])
+    case remove(path: String)
+    case mkdir(path: String, attributes: SFTPAttributes)
+    case rmdir(path: String)
+    case realpath(path: String)
+    case stat(path: String)
+    case rename(oldPath: String, newPath: String)
+    case readlink(path: String)
+    case symlink(linkPath: String, targetPath: String)
+    case extended(name: String, data: [UInt8])
+}
+
+public enum SFTPResponseMessage: Sendable, Equatable {
+    case status(SFTPStatus)
+    case handle([UInt8])
+    case data([UInt8])
+    case name([SFTPNameEntry])
+    case attributes(SFTPAttributes)
+    case extendedReply([UInt8])
+}
+
+public enum SFTPError: Error, Sendable, Equatable {
+    case invalidChannelType
+    case sessionNotReady
+    case subsystemRejected
+    case unsupportedVersion(UInt32)
+    case channelClosed
+    case protocolViolation(String)
+    case unexpectedResponse(String)
+    case status(SFTPStatus)
+}
+
+public struct SFTPClientEvent: Sendable, Equatable {
+    public var standardError: ByteBuffer
+
+    public init(standardError: ByteBuffer) {
+        self.standardError = standardError
+    }
+}

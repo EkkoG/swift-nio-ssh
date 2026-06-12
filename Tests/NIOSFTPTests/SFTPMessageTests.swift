@@ -1,0 +1,81 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the SwiftNIO open source project
+//
+// Copyright (c) 2026 Apple Inc. and the SwiftNIO project authors
+// Licensed under Apache License v2.0
+//
+// See LICENSE.txt for license information
+// See CONTRIBUTORS.txt for the list of SwiftNIO project authors
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+//===----------------------------------------------------------------------===//
+
+import NIOCore
+import XCTest
+
+@testable import NIOSFTP
+
+final class SFTPMessageTests: XCTestCase {
+    func testVersionFrameRoundTrip() throws {
+        let allocator = ByteBufferAllocator()
+        let encodedFrame = SFTPResponseEncoder.encodeVersion(
+            .v3,
+            extensions: [.init(name: "posix-rename@openssh.com", data: Array("1".utf8))],
+            allocator: allocator
+        )
+
+        var buffer = encodedFrame
+        let frame = try buffer.readSFTPFrame()
+        XCTAssertEqual(
+            frame,
+            SFTPInboundPacket.version(.v3, [.init(name: "posix-rename@openssh.com", data: Array("1".utf8))])
+        )
+        XCTAssertEqual(buffer.readableBytes, 0)
+    }
+
+    func testOpenRequestRoundTrip() throws {
+        let allocator = ByteBufferAllocator()
+        let attributes = SFTPAttributes(size: 7, permissions: 0o644)
+        let requestFrame = SFTPRequestEncoder.encode(
+            .open(path: "/tmp/file.txt", pflags: [.read, .write, .create], attributes: attributes),
+            requestID: 42,
+            allocator: allocator
+        )
+
+        var encoded = requestFrame
+        guard let length = encoded.readInteger(as: UInt32.self),
+            let type = encoded.readInteger(as: UInt8.self),
+            let payload = encoded.readSlice(length: Int(length) - 1)
+        else {
+            XCTFail("Missing SFTP frame data")
+            return
+        }
+
+        let decoded = try SFTPRequestDecoder.decode(type: type, payload: payload)
+        XCTAssertEqual(decoded.0, 42)
+        XCTAssertEqual(
+            decoded.1,
+            SFTPRequestMessage.open(path: "/tmp/file.txt", pflags: [.read, .write, .create], attributes: attributes)
+        )
+    }
+
+    func testPartialFrameReturnsNil() throws {
+        let allocator = ByteBufferAllocator()
+        let fullFrame = SFTPResponseEncoder.encode(.status(.init(code: .ok)), requestID: 1, allocator: allocator)
+        let bytes = Array(fullFrame.readableBytesView)
+        var buffer = allocator.buffer(capacity: bytes.count)
+
+        for byte in bytes.dropLast() {
+            buffer.writeInteger(byte)
+            XCTAssertNil(try buffer.readSFTPFrame())
+        }
+
+        buffer.writeInteger(bytes.last!)
+        XCTAssertEqual(
+            try buffer.readSFTPFrame(),
+            SFTPInboundPacket.response(id: 1, .status(.init(code: .ok)))
+        )
+    }
+}
