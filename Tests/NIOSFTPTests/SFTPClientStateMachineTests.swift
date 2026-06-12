@@ -21,11 +21,12 @@ import XCTest
 final class SFTPClientStateMachineTests: XCTestCase {
     func testStartupFlowTransitionsToReady() {
         var stateMachine = SFTPClientStateMachine()
+        let extensions = [SFTPExtension(name: SFTPExtensionName.fsync.rawValue, data: Array("1".utf8))]
 
         assertAction(stateMachine.beginStartupIfNeeded(channelIsActive: false), matches: .none)
         assertAction(stateMachine.beginStartupIfNeeded(channelIsActive: true), matches: .sendSubsystemRequest)
         assertAction(stateMachine.receiveSubsystemSuccess(), matches: .sendInit)
-        assertAction(stateMachine.receivePacket(.version(.v3, [])), matches: .startupSucceeded)
+        assertAction(stateMachine.receivePacket(.version(.v3, extensions)), matches: .startupSucceeded(extensions))
     }
 
     func testSubsystemFailureFailsStartup() {
@@ -113,8 +114,10 @@ final class SFTPClientStateMachineTests: XCTestCase {
 
     private func assertAction(_ action: SFTPClientStateMachine.Action, matches expected: StaticAction) {
         switch (action, expected) {
-        case (.none, .none), (.sendSubsystemRequest, .sendSubsystemRequest), (.sendInit, .sendInit), (.startupSucceeded, .startupSucceeded):
+        case (.none, .none), (.sendSubsystemRequest, .sendSubsystemRequest), (.sendInit, .sendInit):
             return
+        case (.startupSucceeded(let actual), .startupSucceeded(let expectedExtensions)):
+            XCTAssertEqual(actual, expectedExtensions)
         default:
             XCTFail("Unexpected action \(action) for expected \(expected)")
         }
@@ -125,5 +128,5 @@ private enum StaticAction {
     case none
     case sendSubsystemRequest
     case sendInit
-    case startupSucceeded
+    case startupSucceeded([SFTPExtension])
 }

@@ -78,4 +78,30 @@ final class SFTPMessageTests: XCTestCase {
             SFTPInboundPacket.response(id: 1, .status(.init(code: .ok)))
         )
     }
+
+    func testExtendedRequestRoundTripPreservesRawPayload() throws {
+        let allocator = ByteBufferAllocator()
+        var payload = allocator.buffer(capacity: 64)
+        payload.writeSFTPString("/tmp/source")
+        payload.writeSFTPString("/tmp/destination")
+
+        let requestFrame = SFTPRequestEncoder.encode(
+            .extended(name: SFTPExtensionName.posixRename.rawValue, data: Array(payload.readableBytesView)),
+            requestID: 7,
+            allocator: allocator
+        )
+
+        var encoded = requestFrame
+        guard let length = encoded.readInteger(as: UInt32.self),
+            let type = encoded.readInteger(as: UInt8.self),
+            let framePayload = encoded.readSlice(length: Int(length) - 1)
+        else {
+            XCTFail("Missing SFTP frame data")
+            return
+        }
+
+        let decoded = try SFTPRequestDecoder.decode(type: type, payload: framePayload)
+        XCTAssertEqual(decoded.0, 7)
+        XCTAssertEqual(decoded.1, .extended(name: SFTPExtensionName.posixRename.rawValue, data: Array(payload.readableBytesView)))
+    }
 }

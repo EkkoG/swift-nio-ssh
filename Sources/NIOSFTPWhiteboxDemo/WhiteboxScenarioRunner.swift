@@ -28,6 +28,10 @@ struct WhiteboxScenarioRunner {
         let filePath = "\(nestedDirectory)/payload.txt"
         let renamedFilePath = "\(nestedDirectory)/payload-renamed.txt"
         let conflictingFilePath = "\(nestedDirectory)/already-there.txt"
+        let posixSourcePath = "\(nestedDirectory)/payload-posix-source.txt"
+        let posixTargetPath = "\(nestedDirectory)/payload-posix-target.txt"
+        let hardlinkPath = "\(nestedDirectory)/payload-hardlink.txt"
+        let copyDataPath = "\(nestedDirectory)/payload-copy.txt"
         let symlinkPath = "\(basePath)/payload-link"
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -87,6 +91,8 @@ struct WhiteboxScenarioRunner {
 
         let canonicalRoot = try sftp.realpath(config.root).wait()
         results.append(.init(name: "REALPATH", detail: canonicalRoot))
+        let supportedExtensions = SFTPExtensionName.allCases.filter { sftp.supportsExtension($0) }.map(\.rawValue)
+        results.append(.init(name: "EXTENSIONS", detail: supportedExtensions.isEmpty ? "none" : supportedExtensions.joined(separator: ",")))
 
         try sftp.mkdir(path: basePath).wait()
         createdBaseDirectory = true
@@ -118,6 +124,30 @@ struct WhiteboxScenarioRunner {
 
         try sftp.fsetstat(file: fileHandle, attributes: .init(permissions: 0o640)).wait()
         results.append(.init(name: "FSETSTAT", detail: "perms=640"))
+
+        if sftp.supportsExtension(.fsync) {
+            try sftp.fsync(file: fileHandle).wait()
+            results.append(.init(name: "FSYNC", detail: filePath))
+        } else {
+            results.append(.init(name: "FSYNC", detail: "skipped: unsupported"))
+        }
+
+        if sftp.supportsExtension(.statvfs) {
+            let statvfs = try sftp.statvfs(path: nestedDirectory).wait()
+            try assertCondition(statvfs.blockSize > 0, "STATVFS block size must be nonzero")
+            results.append(.init(name: "STATVFS", detail: "bsize=\(statvfs.blockSize) namemax=\(statvfs.maximumNameLength)"))
+        } else {
+            results.append(.init(name: "STATVFS", detail: "skipped: unsupported"))
+        }
+
+        if sftp.supportsExtension(.fstatvfs) && sftp.supportsExtension(.statvfs) {
+            let pathStats = try sftp.statvfs(path: filePath).wait()
+            let handleStats = try sftp.fstatvfs(file: fileHandle).wait()
+            try assertCondition(pathStats == handleStats, "FSTATVFS mismatch")
+            results.append(.init(name: "FSTATVFS", detail: "bsize=\(handleStats.blockSize) flags=\(handleStats.flags.rawValue)"))
+        } else {
+            results.append(.init(name: "FSTATVFS", detail: "skipped: unsupported"))
+        }
 
         let readPrefix = try sftp.read(file: fileHandle, offset: 0, length: 5).wait()
         try assertCondition(string(from: readPrefix) == "hello", "READ prefix mismatch")
@@ -203,6 +233,52 @@ struct WhiteboxScenarioRunner {
         try sftp.closeFile(conflictContentsHandle).wait()
         results.append(.init(name: "RENAME existing destination", detail: renameConflictError))
 
+        if sftp.supportsExtension(.posixRename) {
+            let posixSource = try sftp.openFile(path: posixSourcePath, flags: [.create, .read, .write, .truncate]).wait()
+            try sftp.write(file: posixSource, offset: 0, data: exactBuffer(finalPayload)).wait()
+            try sftp.closeFile(posixSource).wait()
+
+            let posixTarget = try sftp.openFile(path: posixTargetPath, flags: [.create, .read, .write, .truncate]).wait()
+            try sftp.write(file: posixTarget, offset: 0, data: exactBuffer("old target")).wait()
+            try sftp.closeFile(posixTarget).wait()
+
+            try sftp.posixRename(from: posixSourcePath, to: posixTargetPath).wait()
+            let replacedHandle = try sftp.openFile(path: posixTargetPath, flags: [.read]).wait()
+            let replacedContents = try sftp.read(file: replacedHandle, offset: 0, length: 64).wait()
+            try assertCondition(string(from: replacedContents) == finalPayload, "POSIX_RENAME target mismatch")
+            try sftp.closeFile(replacedHandle).wait()
+            let posixSourceMissing = try expectMissing(sftp, path: posixSourcePath, operationName: "POSIX_RENAME source")
+            results.append(.init(name: "POSIX_RENAME", detail: "\(posixSourcePath) -> \(posixTargetPath)"))
+            results.append(.init(name: "POSIX_RENAME source", detail: posixSourceMissing))
+            try sftp.remove(path: posixTargetPath).wait()
+        } else {
+            results.append(.init(name: "POSIX_RENAME", detail: "skipped: unsupported"))
+        }
+
+        if sftp.supportsExtension(.hardlink) {
+            try sftp.hardlink(from: renamedFilePath, to: hardlinkPath).wait()
+            let hardlinkHandle = try sftp.openFile(path: hardlinkPath, flags: [.read]).wait()
+            let hardlinkContents = try sftp.read(file: hardlinkHandle, offset: 0, length: 64).wait()
+            try assertCondition(string(from: hardlinkContents) == finalPayload, "HARDLINK content mismatch")
+            try sftp.closeFile(hardlinkHandle).wait()
+            results.append(.init(name: "HARDLINK", detail: "\(renamedFilePath) -> \(hardlinkPath)"))
+        } else {
+            results.append(.init(name: "HARDLINK", detail: "skipped: unsupported"))
+        }
+
+        if sftp.supportsExtension(.copyData) {
+            let copyDestination = try sftp.openFile(path: copyDataPath, flags: [.create, .read, .write, .truncate]).wait()
+            let copySource = try sftp.openFile(path: renamedFilePath, flags: [.read]).wait()
+            try sftp.copyData(from: copySource, readOffset: 0, length: 0, to: copyDestination, writeOffset: 0).wait()
+            let copiedContents = try sftp.read(file: copyDestination, offset: 0, length: 64).wait()
+            try assertCondition(string(from: copiedContents) == finalPayload, "COPY_DATA content mismatch")
+            try sftp.closeFile(copySource).wait()
+            try sftp.closeFile(copyDestination).wait()
+            results.append(.init(name: "COPY_DATA", detail: "\(renamedFilePath) -> \(copyDataPath)"))
+        } else {
+            results.append(.init(name: "COPY_DATA", detail: "skipped: unsupported"))
+        }
+
         do {
             try sftp.symlink(linkPath: symlinkPath, targetPath: renamedFilePath).wait()
             createdSymlink = true
@@ -246,6 +322,20 @@ struct WhiteboxScenarioRunner {
         results.append(.init(name: "REMOVE conflict", detail: conflictingFilePath))
         let removedConflictCheck = try expectMissing(sftp, path: conflictingFilePath, operationName: "REMOVE conflict")
         results.append(.init(name: "REMOVE conflict verify", detail: removedConflictCheck))
+
+        if sftp.supportsExtension(.hardlink) {
+            try sftp.remove(path: hardlinkPath).wait()
+            let removedHardlinkCheck = try expectMissing(sftp, path: hardlinkPath, operationName: "REMOVE hardlink")
+            results.append(.init(name: "REMOVE hardlink", detail: hardlinkPath))
+            results.append(.init(name: "REMOVE hardlink verify", detail: removedHardlinkCheck))
+        }
+
+        if sftp.supportsExtension(.copyData) {
+            try sftp.remove(path: copyDataPath).wait()
+            let removedCopyCheck = try expectMissing(sftp, path: copyDataPath, operationName: "REMOVE copied file")
+            results.append(.init(name: "REMOVE copied file", detail: copyDataPath))
+            results.append(.init(name: "REMOVE copied file verify", detail: removedCopyCheck))
+        }
 
         if createdSymlink {
             try sftp.remove(path: symlinkPath).wait()

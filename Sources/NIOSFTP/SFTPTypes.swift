@@ -34,6 +34,107 @@ public struct SFTPExtension: Sendable, Equatable {
     }
 }
 
+public enum SFTPExtensionName: String, CaseIterable, Sendable {
+    case posixRename = "posix-rename@openssh.com"
+    case statvfs = "statvfs@openssh.com"
+    case fstatvfs = "fstatvfs@openssh.com"
+    case hardlink = "hardlink@openssh.com"
+    case fsync = "fsync@openssh.com"
+    case copyData = "copy-data"
+
+    var supportedVersion: String {
+        switch self {
+        case .statvfs, .fstatvfs:
+            return "2"
+        case .posixRename, .hardlink, .fsync, .copyData:
+            return "1"
+        }
+    }
+}
+
+public struct SFTPServerCapabilities: Sendable, Equatable {
+    public let rawExtensions: [SFTPExtension]
+
+    private let advertisedVersionsByName: [String: [String]]
+
+    public init(rawExtensions: [SFTPExtension]) {
+        self.rawExtensions = rawExtensions
+        self.advertisedVersionsByName = Dictionary(
+            grouping: rawExtensions,
+            by: \.name
+        ).mapValues { entries in
+            entries.map { String(decoding: $0.data, as: UTF8.self) }
+        }
+    }
+
+    public func isAdvertised(_ name: String) -> Bool {
+        self.advertisedVersionsByName[name] != nil
+    }
+
+    public func advertisedVersions(for name: String) -> [String] {
+        self.advertisedVersionsByName[name] ?? []
+    }
+
+    public func advertisedVersions(for extensionName: SFTPExtensionName) -> [String] {
+        self.advertisedVersions(for: extensionName.rawValue)
+    }
+
+    public func supports(_ extensionName: SFTPExtensionName) -> Bool {
+        self.advertisedVersions(for: extensionName).contains(extensionName.supportedVersion)
+    }
+}
+
+public struct SFTPFileSystemFlags: OptionSet, Sendable, Hashable {
+    public let rawValue: UInt64
+
+    public init(rawValue: UInt64) {
+        self.rawValue = rawValue
+    }
+
+    public static let readOnly = SFTPFileSystemFlags(rawValue: 0x1)
+    public static let noSetUID = SFTPFileSystemFlags(rawValue: 0x2)
+}
+
+public struct SFTPFileSystemAttributes: Sendable, Equatable {
+    public var blockSize: UInt64
+    public var fundamentalBlockSize: UInt64
+    public var totalBlocks: UInt64
+    public var freeBlocks: UInt64
+    public var availableBlocks: UInt64
+    public var totalFileNodes: UInt64
+    public var freeFileNodes: UInt64
+    public var availableFileNodes: UInt64
+    public var fileSystemID: UInt64
+    public var flags: SFTPFileSystemFlags
+    public var maximumNameLength: UInt64
+
+    public init(
+        blockSize: UInt64,
+        fundamentalBlockSize: UInt64,
+        totalBlocks: UInt64,
+        freeBlocks: UInt64,
+        availableBlocks: UInt64,
+        totalFileNodes: UInt64,
+        freeFileNodes: UInt64,
+        availableFileNodes: UInt64,
+        fileSystemID: UInt64,
+        flags: SFTPFileSystemFlags,
+        maximumNameLength: UInt64
+    ) {
+        self.blockSize = blockSize
+        self.fundamentalBlockSize = fundamentalBlockSize
+        self.totalBlocks = totalBlocks
+        self.freeBlocks = freeBlocks
+        self.availableBlocks = availableBlocks
+        self.totalFileNodes = totalFileNodes
+        self.freeFileNodes = freeFileNodes
+        self.availableFileNodes = availableFileNodes
+        self.fileSystemID = fileSystemID
+        self.flags = flags
+        self.maximumNameLength = maximumNameLength
+    }
+}
+
 public struct SFTPFileHandle: Sendable, Hashable, Equatable {
     public var bytes: [UInt8]
 
@@ -231,6 +332,7 @@ public enum SFTPError: Error, Sendable, Equatable {
     case sessionNotReady
     case subsystemRejected
     case unsupportedVersion(UInt32)
+    case unsupportedExtension(SFTPExtensionName)
     case channelClosed
     case protocolViolation(String)
     case unexpectedResponse(String)

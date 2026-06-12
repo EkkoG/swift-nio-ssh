@@ -17,40 +17,43 @@ import NIOSSH
 
 public final class SFTPClient: @unchecked Sendable {
     public let channel: Channel
+    public let serverCapabilities: SFTPServerCapabilities
 
     private let handler: SFTPClientHandler
 
-    private init(channel: Channel, handler: SFTPClientHandler) {
+    private init(channel: Channel, handler: SFTPClientHandler, serverCapabilities: SFTPServerCapabilities) {
         self.channel = channel
         self.handler = handler
+        self.serverCapabilities = serverCapabilities
     }
 
     public static func start(on channel: Channel) -> EventLoopFuture<SFTPClient> {
         let handler = SFTPClientHandler(loop: channel.eventLoop, allocator: channel.allocator)
         return channel.pipeline.addHandler(handler).flatMap {
-            handler.startupFuture.map {
-                SFTPClient(channel: channel, handler: handler)
+            handler.startupFuture.map { capabilities in
+                SFTPClient(channel: channel, handler: handler, serverCapabilities: capabilities)
             }
         }
     }
 
     public static func openChannel(with sshHandler: NIOSSHHandler, on channel: Channel) -> EventLoopFuture<SFTPClient> {
         let sftpPromise = channel.eventLoop.makePromise(of: SFTPClient.self)
-        let loopBoundSSHHandler = NIOLoopBound(sshHandler, eventLoop: channel.eventLoop)
-        let loopBoundPromise = NIOLoopBound(sftpPromise, eventLoop: channel.eventLoop)
 
         channel.eventLoop.execute {
-            loopBoundSSHHandler.value.createChannel(nil, channelType: .session) { childChannel, channelType in
+            sshHandler.createChannel(nil, channelType: .session) { childChannel, channelType in
                 guard channelType == .session else {
                     return childChannel.eventLoop.makeFailedFuture(SFTPError.invalidChannelType)
                 }
 
                 let handler = SFTPClientHandler(loop: childChannel.eventLoop, allocator: childChannel.allocator)
-                let client = SFTPClient(channel: childChannel, handler: handler)
-                loopBoundPromise.value.completeWith(handler.startupFuture.map { client })
+                sftpPromise.completeWith(
+                    handler.startupFuture.map { capabilities in
+                        SFTPClient(channel: childChannel, handler: handler, serverCapabilities: capabilities)
+                    }
+                )
 
                 return childChannel.pipeline.addHandler(handler).flatMapError { error in
-                    loopBoundPromise.value.fail(error)
+                    sftpPromise.fail(error)
                     return childChannel.eventLoop.makeFailedFuture(error)
                 }
             }
@@ -65,6 +68,10 @@ public final class SFTPClient: @unchecked Sendable {
             promise.completeWith(self.handler.send(message))
         }
         return promise.futureResult
+    }
+
+    public func supportsExtension(_ extensionName: SFTPExtensionName) -> Bool {
+        self.serverCapabilities.supports(extensionName)
     }
 
     public func openFile(
@@ -213,6 +220,58 @@ public final class SFTPClient: @unchecked Sendable {
         self.statusOnly(.symlink(linkPath: linkPath, targetPath: targetPath), operation: "SYMLINK")
     }
 
+    public func posixRename(from oldPath: String, to newPath: String) -> EventLoopFuture<Void> {
+        self.extendedStatusOnly(.posixRename, operation: "POSIX_RENAME") { body in
+            body.writeSFTPString(oldPath)
+            body.writeSFTPString(newPath)
+        }
+    }
+
+    public func fsync(file: SFTPFileHandle) -> EventLoopFuture<Void> {
+        self.extendedStatusOnly(.fsync, operation: "FSYNC") { body in
+            body.writeSFTPString(file.bytes)
+        }
+    }
+
+    public func statvfs(path: String) -> EventLoopFuture<SFTPFileSystemAttributes> {
+        self.extendedReply(.statvfs, operation: "STATVFS") { body in
+            body.writeSFTPString(path)
+        } decode: { payload in
+            try payload.readSFTPFileSystemAttributes()
+        }
+    }
+
+    public func fstatvfs(file: SFTPFileHandle) -> EventLoopFuture<SFTPFileSystemAttributes> {
+        self.extendedReply(.fstatvfs, operation: "FSTATVFS") { body in
+            body.writeSFTPString(file.bytes)
+        } decode: { payload in
+            try payload.readSFTPFileSystemAttributes()
+        }
+    }
+
+    public func hardlink(from oldPath: String, to newPath: String) -> EventLoopFuture<Void> {
+        self.extendedStatusOnly(.hardlink, operation: "HARDLINK") { body in
+            body.writeSFTPString(oldPath)
+            body.writeSFTPString(newPath)
+        }
+    }
+
+    public func copyData(
+        from source: SFTPFileHandle,
+        readOffset: UInt64,
+        length: UInt64,
+        to destination: SFTPFileHandle,
+        writeOffset: UInt64
+    ) -> EventLoopFuture<Void> {
+        self.extendedStatusOnly(.copyData, operation: "COPY_DATA") { body in
+            body.writeSFTPString(source.bytes)
+            body.writeInteger(readOffset)
+            body.writeInteger(length)
+            body.writeSFTPString(destination.bytes)
+            body.writeInteger(writeOffset)
+        }
+    }
+
     private func closeHandle(_ handle: [UInt8]) -> EventLoopFuture<Void> {
         self.statusOnly(.close(handle: handle), operation: "CLOSE")
     }
@@ -245,5 +304,62 @@ public final class SFTPClient: @unchecked Sendable {
                 throw SFTPError.unexpectedResponse("\(operation) expected STATUS")
             }
         }
+    }
+
+    private func extendedStatusOnly(
+        _ extensionName: SFTPExtensionName,
+        operation: String,
+        payloadWriter: (inout ByteBuffer) -> Void
+    ) -> EventLoopFuture<Void> {
+        self.extendedRequest(extensionName, operation: operation, payloadWriter: payloadWriter).flatMapThrowing { response in
+            switch response {
+            case .status(let status) where status.code == .ok:
+                return ()
+            case .status(let status):
+                throw SFTPError.status(status)
+            default:
+                throw SFTPError.unexpectedResponse("\(operation) expected STATUS")
+            }
+        }
+    }
+
+    private func extendedReply<T>(
+        _ extensionName: SFTPExtensionName,
+        operation: String,
+        payloadWriter: (inout ByteBuffer) -> Void,
+        decode: @escaping @Sendable (inout ByteBuffer) throws -> T
+    ) -> EventLoopFuture<T> {
+        self.extendedRequest(extensionName, operation: operation, payloadWriter: payloadWriter).flatMapThrowing { response in
+            switch response {
+            case .extendedReply(let bytes):
+                var payload = self.channel.allocator.buffer(capacity: bytes.count)
+                payload.writeBytes(bytes)
+                return try decode(&payload)
+            case .status(let status):
+                throw SFTPError.status(status)
+            default:
+                throw SFTPError.unexpectedResponse("\(operation) expected EXTENDED_REPLY or STATUS")
+            }
+        }
+    }
+
+    private func extendedRequest(
+        _ extensionName: SFTPExtensionName,
+        operation: String,
+        payloadWriter: (inout ByteBuffer) -> Void
+    ) -> EventLoopFuture<SFTPResponseMessage> {
+        guard self.supportsExtension(extensionName) else {
+            return self.channel.eventLoop.makeFailedFuture(SFTPError.unsupportedExtension(extensionName))
+        }
+
+        var payload = self.channel.allocator.buffer(capacity: 128)
+        payloadWriter(&payload)
+        return self.send(.extended(name: extensionName.rawValue, data: Array(payload.readableBytesView)))
+            .flatMapThrowing { response in
+                if case .status(let status) = response, status.code == .operationUnsupported {
+                    throw SFTPError.unsupportedExtension(extensionName)
+                }
+                return response
+            }
     }
 }

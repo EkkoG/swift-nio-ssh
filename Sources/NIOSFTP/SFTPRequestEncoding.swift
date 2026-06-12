@@ -56,7 +56,7 @@ enum SFTPRequestEncoder {
                 body.writeSFTPString(linkPath)
             case .extended(let name, let data):
                 body.writeSFTPString(name)
-                body.writeSFTPString(data)
+                body.writeBytes(data)
             }
         }
         return buffer

@@ -125,10 +125,10 @@ enum SFTPRequestDecoder {
             }
             return (requestID, .symlink(linkPath: linkPath, targetPath: targetPath))
         case SFTPPacketType.extended:
-            guard let name = payload.readSFTPString(), let data = payload.readSFTPStringBuffer() else {
+            guard let name = payload.readSFTPString() else {
                 throw SFTPError.protocolViolation("Invalid EXTENDED request")
             }
-            return (requestID, .extended(name: name, data: Array(data.readableBytesView)))
+            return (requestID, .extended(name: name, data: Array(payload.readableBytesView)))
         default:
             throw SFTPError.protocolViolation("Unsupported SFTP request type \(type)")
         }

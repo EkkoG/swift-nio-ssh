@@ -42,7 +42,7 @@ struct SFTPClientStateMachine {
         case none
         case sendSubsystemRequest
         case sendInit
-        case startupSucceeded
+        case startupSucceeded([SFTPExtension])
         case requestSucceeded(EventLoopPromise<SFTPResponseMessage>, SFTPResponseMessage)
         case sessionFailed(Error, failStartup: Bool, pendingPromises: [EventLoopPromise<SFTPResponseMessage>])
     }
@@ -95,7 +95,7 @@ struct SFTPClientStateMachine {
 
     mutating func receivePacket(_ packet: SFTPInboundPacket) -> Action {
         switch packet {
-        case .version(let version, _):
+        case .version(let version, let extensions):
             guard self.phase == .waitingForVersion else {
                 return self.failSession(error: SFTPError.unexpectedResponse("Received VERSION outside startup"))
             }
@@ -104,7 +104,7 @@ struct SFTPClientStateMachine {
             }
             self.phase = .ready
             self.startupResolved = true
-            return .startupSucceeded
+            return .startupSucceeded(extensions)
         case .response(let requestID, let response):
             guard self.phase == .ready else {
                 return self.failSession(error: SFTPError.unexpectedResponse("Received response before startup completed"))

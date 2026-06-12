@@ -153,6 +153,27 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
     private var fileHandles: [String: String] = [:]
     private var directoryHandles: [String: (path: String, emitted: Bool)] = [:]
     private var nextHandle = 0
+    private let fileSystemAttributes = SFTPFileSystemAttributes(
+        blockSize: 4096,
+        fundamentalBlockSize: 4096,
+        totalBlocks: 1024,
+        freeBlocks: 768,
+        availableBlocks: 768,
+        totalFileNodes: 256,
+        freeFileNodes: 200,
+        availableFileNodes: 200,
+        fileSystemID: 42,
+        flags: [.readOnly],
+        maximumNameLength: 255
+    )
+    private let supportedExtensions: [SFTPExtension] = [
+        .init(name: SFTPExtensionName.posixRename.rawValue, data: Array("1".utf8)),
+        .init(name: SFTPExtensionName.statvfs.rawValue, data: Array("2".utf8)),
+        .init(name: SFTPExtensionName.fstatvfs.rawValue, data: Array("2".utf8)),
+        .init(name: SFTPExtensionName.hardlink.rawValue, data: Array("1".utf8)),
+        .init(name: SFTPExtensionName.fsync.rawValue, data: Array("1".utf8)),
+        .init(name: SFTPExtensionName.copyData.rawValue, data: Array("1".utf8)),
+    ]
 
     init(allocator: ByteBufferAllocator) {
         self.inboundBuffer = allocator.buffer(capacity: 0)
@@ -197,7 +218,7 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
             if type == SFTPPacketType.`init` {
                 let version = payload.readInteger(as: UInt32.self)
                 XCTAssertEqual(version, 3)
-                let versionPacket = SFTPResponseEncoder.encodeVersion(.v3, extensions: [], allocator: context.channel.allocator)
+                let versionPacket = SFTPResponseEncoder.encodeVersion(.v3, extensions: self.supportedExtensions, allocator: context.channel.allocator)
                 self.write(versionPacket, context: context)
                 continue
             }
@@ -328,9 +349,87 @@ private final class FakeSFTPServerHandler: ChannelDuplexHandler, @unchecked Send
             return .name([.init(filename: "/tmp/hello.txt", longname: "/tmp/hello.txt", attributes: .init())])
         case .symlink:
             return .status(.init(code: .ok))
-        case .extended:
+        case .extended(let name, let data):
+            return self.handleExtendedRequest(name: name, data: data)
+        }
+    }
+
+    private func handleExtendedRequest(name: String, data: [UInt8]) -> SFTPResponseMessage {
+        var payload = ByteBuffer(bytes: data)
+
+        switch name {
+        case SFTPExtensionName.posixRename.rawValue:
+            guard let oldPath = payload.readSFTPString(), let newPath = payload.readSFTPString(), let entry = self.files[oldPath] else {
+                return .status(.init(code: .noSuchFile))
+            }
+            self.files.removeValue(forKey: oldPath)
+            self.files[newPath] = entry
+            return .status(.init(code: .ok))
+        case SFTPExtensionName.fsync.rawValue:
+            guard let handle = payload.readSFTPStringBuffer() else {
+                return .status(.init(code: .failure, message: "invalid fsync payload"))
+            }
+            let handleKey = String(decoding: handle.readableBytesView, as: UTF8.self)
+            return self.fileHandles[handleKey] == nil ? .status(.init(code: .failure, message: "invalid file handle")) : .status(.init(code: .ok))
+        case SFTPExtensionName.statvfs.rawValue:
+            guard let path = payload.readSFTPString(), self.directories.contains(path) || self.files[path] != nil else {
+                return .status(.init(code: .noSuchFile))
+            }
+            return .extendedReply(self.encodedFileSystemAttributes())
+        case SFTPExtensionName.fstatvfs.rawValue:
+            guard let handle = payload.readSFTPStringBuffer() else {
+                return .status(.init(code: .failure, message: "invalid fstatvfs payload"))
+            }
+            let handleKey = String(decoding: handle.readableBytesView, as: UTF8.self)
+            return self.fileHandles[handleKey] == nil ? .status(.init(code: .failure, message: "invalid file handle")) : .extendedReply(self.encodedFileSystemAttributes())
+        case SFTPExtensionName.hardlink.rawValue:
+            guard let oldPath = payload.readSFTPString(), let newPath = payload.readSFTPString(), let entry = self.files[oldPath] else {
+                return .status(.init(code: .noSuchFile))
+            }
+            self.files[newPath] = entry
+            return .status(.init(code: .ok))
+        case SFTPExtensionName.copyData.rawValue:
+            guard
+                let readHandle = payload.readSFTPStringBuffer(),
+                let readOffset = payload.readInteger(as: UInt64.self),
+                let readLength = payload.readInteger(as: UInt64.self),
+                let writeHandle = payload.readSFTPStringBuffer(),
+                let writeOffset = payload.readInteger(as: UInt64.self)
+            else {
+                return .status(.init(code: .failure, message: "invalid copy-data payload"))
+            }
+            let readKey = String(decoding: readHandle.readableBytesView, as: UTF8.self)
+            let writeKey = String(decoding: writeHandle.readableBytesView, as: UTF8.self)
+            guard let readPath = self.fileHandles[readKey], let writePath = self.fileHandles[writeKey], var destination = self.files[writePath], let source = self.files[readPath] else {
+                return .status(.init(code: .failure, message: "invalid file handle"))
+            }
+            let start = Int(readOffset)
+            guard start <= source.contents.count else {
+                return .status(.init(code: .eof))
+            }
+            let sourceEnd = readLength == 0 ? source.contents.count : min(source.contents.count, start + Int(readLength))
+            let copiedBytes = Array(source.contents[start..<sourceEnd])
+            let destinationStart = Int(writeOffset)
+            if destination.contents.count < destinationStart {
+                destination.contents.append(contentsOf: repeatElement(0, count: destinationStart - destination.contents.count))
+            }
+            let destinationEnd = destinationStart + copiedBytes.count
+            if destination.contents.count < destinationEnd {
+                destination.contents.append(contentsOf: repeatElement(0, count: destinationEnd - destination.contents.count))
+            }
+            destination.contents.replaceSubrange(destinationStart..<destinationEnd, with: copiedBytes)
+            destination.attributes.size = UInt64(destination.contents.count)
+            self.files[writePath] = destination
+            return .status(.init(code: .ok))
+        default:
             return .status(.init(code: .operationUnsupported))
         }
+    }
+
+    private func encodedFileSystemAttributes() -> [UInt8] {
+        var buffer = ByteBufferAllocator().buffer(capacity: 128)
+        buffer.writeSFTPFileSystemAttributes(self.fileSystemAttributes)
+        return Array(buffer.readableBytesView)
     }
 
     private func write(_ buffer: ByteBuffer, context: ChannelHandlerContext) {
@@ -382,6 +481,10 @@ final class SFTPEndToEndTests: XCTestCase {
         try self.harness.pump()
 
         let client = try self.resolve(SFTPClient.openChannel(with: self.harness.clientSSHHandler, on: self.harness.client))
+        XCTAssertTrue(client.supportsExtension(.posixRename))
+        XCTAssertTrue(client.supportsExtension(.fsync))
+        XCTAssertTrue(client.supportsExtension(.statvfs))
+        XCTAssertEqual(client.serverCapabilities.advertisedVersions(for: .statvfs), ["2"])
 
         XCTAssertEqual(try self.resolve(client.realpath(".")), "/tmp")
 
@@ -401,10 +504,31 @@ final class SFTPEndToEndTests: XCTestCase {
         XCTAssertEqual(attrs.size, 11)
         try self.resolve(client.fsetstat(file: file, attributes: .init(permissions: 0o600)))
         XCTAssertEqual(try self.resolve(client.stat(path: "/tmp/hello.txt")).permissions, 0o600)
+        try self.resolve(client.fsync(file: file))
+        XCTAssertEqual(
+            try self.resolve(client.fstatvfs(file: file)),
+            try self.resolve(client.statvfs(path: "/tmp/hello.txt"))
+        )
         try self.resolve(client.closeFile(file))
 
         XCTAssertThrowsError(try self.resolve(client.rename(from: "/tmp/hello.txt", to: "/tmp/existing.txt"))) { error in
             XCTAssertEqual(error as? SFTPError, .status(.init(code: .failure, message: "destination exists")))
         }
+
+        try self.resolve(client.posixRename(from: "/tmp/hello.txt", to: "/tmp/existing.txt"))
+        let renamed = try self.resolve(client.openFile(path: "/tmp/existing.txt", flags: [.read]))
+        XCTAssertEqual(try self.resolve(client.read(file: renamed, offset: 0, length: 32)).map { String(buffer: $0) }, "hello swift")
+
+        let hardlinkPath = "/tmp/hardlink.txt"
+        try self.resolve(client.hardlink(from: "/tmp/existing.txt", to: hardlinkPath))
+        let hardlink = try self.resolve(client.openFile(path: hardlinkPath, flags: [.read]))
+        XCTAssertEqual(try self.resolve(client.read(file: hardlink, offset: 0, length: 32)).map { String(buffer: $0) }, "hello swift")
+        try self.resolve(client.closeFile(hardlink))
+
+        let copied = try self.resolve(client.openFile(path: "/tmp/copied.txt", flags: [.create, .read, .write, .truncate]))
+        try self.resolve(client.copyData(from: renamed, readOffset: 0, length: 0, to: copied, writeOffset: 0))
+        XCTAssertEqual(try self.resolve(client.read(file: copied, offset: 0, length: 32)).map { String(buffer: $0) }, "hello swift")
+        try self.resolve(client.closeFile(copied))
+        try self.resolve(client.closeFile(renamed))
     }
 }

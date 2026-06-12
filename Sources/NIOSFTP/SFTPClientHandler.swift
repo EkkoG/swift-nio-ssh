@@ -20,15 +20,15 @@ final class SFTPClientHandler: ChannelDuplexHandler, @unchecked Sendable {
     typealias OutboundIn = Never
     typealias OutboundOut = SSHChannelData
 
-    private(set) var startupFuture: EventLoopFuture<Void>
+    private(set) var startupFuture: EventLoopFuture<SFTPServerCapabilities>
 
-    private let startupPromise: EventLoopPromise<Void>
+    private let startupPromise: EventLoopPromise<SFTPServerCapabilities>
     private var stateMachine = SFTPClientStateMachine()
     private var context: ChannelHandlerContext?
     private var inboundBuffer: ByteBuffer
 
     init(loop: EventLoop, allocator: ByteBufferAllocator) {
-        self.startupPromise = loop.makePromise(of: Void.self)
+        self.startupPromise = loop.makePromise(of: SFTPServerCapabilities.self)
         self.startupFuture = self.startupPromise.futureResult
         self.inboundBuffer = allocator.buffer(capacity: 0)
     }
@@ -124,9 +124,12 @@ final class SFTPClientHandler: ChannelDuplexHandler, @unchecked Sendable {
 
     private func writeAndFlush(buffer: ByteBuffer, context: ChannelHandlerContext) {
         let loopBoundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
+        let eventLoop = context.eventLoop
         let wrapped = self.wrapOutboundOut(.init(type: .channel, data: .byteBuffer(buffer)))
         context.writeAndFlush(wrapped).whenFailure { error in
-            self.execute(self.stateMachine.failSession(error: error), context: loopBoundContext.value)
+            eventLoop.execute {
+                self.execute(self.stateMachine.failSession(error: error), context: loopBoundContext.value)
+            }
         }
     }
 
@@ -142,18 +145,21 @@ final class SFTPClientHandler: ChannelDuplexHandler, @unchecked Sendable {
             return
         case .sendSubsystemRequest:
             let loopBoundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
+            let eventLoop = context.eventLoop
             context.triggerUserOutboundEvent(
                 SSHChannelRequestEvent.SubsystemRequest(subsystem: "sftp", wantReply: true)
             ).whenFailure { error in
-                self.execute(self.stateMachine.failSession(error: error), context: loopBoundContext.value)
+                eventLoop.execute {
+                    self.execute(self.stateMachine.failSession(error: error), context: loopBoundContext.value)
+                }
             }
         case .sendInit:
             self.writeAndFlush(
                 buffer: SFTPRequestEncoder.encodeInit(version: .v3, allocator: context.channel.allocator),
                 context: context
             )
-        case .startupSucceeded:
-            self.startupPromise.succeed(())
+        case .startupSucceeded(let extensions):
+            self.startupPromise.succeed(.init(rawExtensions: extensions))
         case .requestSucceeded(let promise, let response):
             promise.succeed(response)
         case .sessionFailed(let error, let failStartup, let pendingPromises):
